@@ -1,2 +1,4 @@
-litert
+litert-*
+cmake_builds_*
 *.tar.gz
+android-ndk-linux
