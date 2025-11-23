@@ -45,6 +45,8 @@ done
 
 LITERT_SRC_DIR="litert-${version}"
 BUILD_DIR="/home/${USER}/litert-cpp-dist/cmake_builds_${version}"
+HOST_BUILD_DIR="${BUILD_DIR}_host"
+ANDROID_BUILD_DIR="${BUILD_DIR}_android"
 
 if [ "$clean_litert" = true ]; then
     echo "Cleaning up ${LITERT_SRC_DIR} directory..."
@@ -53,7 +55,7 @@ fi
 
 if [ "$clean_build" = true ]; then
     echo "Cleaning up build directory..."
-    rm -rf "${BUILD_DIR}"
+    rm -rf "${HOST_BUILD_DIR}" "${ANDROID_BUILD_DIR}"
 fi
 
 if [ "$build_litert" = false ]; then
@@ -69,19 +71,23 @@ fi
 
 cd "${LITERT_SRC_DIR}/litert"
 
-echo "Building LiteRT version ${version}..."
-cmake --preset android-arm64 -B "${BUILD_DIR}"
-cmake --build "${BUILD_DIR}" --target flatc -j8
+echo -e "\nBuilding Host Tools (flatc)...\n"
+cmake --preset default \
+    -B "${HOST_BUILD_DIR}" \
+    -DLITERT_BUILD_TESTS=OFF \
+    -DLITERT_ENABLE_XNNPACK=OFF \
 
-# Build Target (Android) Library
-# Point to the host tools we just built so we don't need to patch find_package
+cmake --build "${HOST_BUILD_DIR}" --target flatc -j8
+
+echo -e "\nBuilding Android Library...\n"
 cmake --preset android-arm64 \
-  -B "${BUILD_DIR}" \
-  -DTFLITE_HOST_TOOLS_DIR="${BUILD_DIR}/_deps/flatbuffers-build" \
+  -B "${ANDROID_BUILD_DIR}" \
+  -DTFLITE_HOST_TOOLS_DIR="${HOST_BUILD_DIR}/_deps/flatbuffers-build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DLITERT_ENABLE_GPU=ON \
   -DLITERT_ENABLE_XNNPACK=ON \
   -DCMAKE_SHARED_LINKER_FLAGS_RELEASE="-Wl,--gc-sections" 
 
-cmake --build "${BUILD_DIR}" -j8
-echo "LiteRT build completed."
+cmake --build "${ANDROID_BUILD_DIR}" -j8
+
+echo -e "\nLiteRT build completed. Artifacts are in ${ANDROID_BUILD_DIR}"
