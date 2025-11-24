@@ -5,7 +5,7 @@ set -ueo pipefail
 
 # Default configuration
 LITERT_REPO_URL="${LITERT_REPO_URL:-https://github.com/google-ai-edge/LiteRT.git}"
-LITERT_TAG="${LITERT_TAG:-2.1.0rc1}"
+LITERT_TAG="${LITERT_TAG:-v2.1.0rc1}"
 LITERT_SRC="${LITERT_SRC:-litert}"
 OUTPUT_DIR="$(pwd)/litert_android_arm64"
 ZIP_FILE="$(pwd)/litert_android_arm64.zip"
@@ -16,15 +16,6 @@ if [ ! -d "${LITERT_SRC}" ]; then
     git clone --depth 1 --branch "${LITERT_TAG}" "${LITERT_REPO_URL}" "${LITERT_SRC}"
 else
     echo "LiteRT source found at ${LITERT_SRC}."
-fi
-
-# Copy docker_build files from the cloned repo to the working location
-if [ -d "${LITERT_SRC}/litert/docker_build" ]; then
-    echo "Copying docker_build files from ${LITERT_SRC}/litert/docker_build..."
-    mkdir -p "${LITERT_SRC}/docker_build"
-    cp -r "${LITERT_SRC}/litert/docker_build/"* "${LITERT_SRC}/docker_build/"
-else
-    echo "WARNING: docker_build directory not found in ${LITERT_SRC}/litert/docker_build"
 fi
 
 cd "${LITERT_SRC}"
