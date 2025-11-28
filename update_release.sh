@@ -3,7 +3,7 @@
 REPO_OWNER="mihon-ocr"
 REPO_NAME="litert-cpp-dist"
 TAG="v2.1.0rc1"
-FILE_NAME="litert_android_arm64.zip"
+FILE_NAME="litert_android.zip"
 
 # Check if the file exists locally
 if [ ! -f "$FILE_NAME" ]; then
