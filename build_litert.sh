@@ -5,8 +5,8 @@ set -ueo pipefail
 LITERT_REPO_URL="${LITERT_REPO_URL:-https://github.com/google-ai-edge/LiteRT.git}"
 LITERT_TAG="${LITERT_TAG:-v2.1.0rc1}"
 LITERT_SRC="${LITERT_SRC:-litert}"
-OUTPUT_DIR="$(pwd)/litert_android_arm64"
-ZIP_FILE="$(pwd)/litert_android_arm64.zip"
+OUTPUT_DIR="$(pwd)/litert_android"
+ZIP_FILE="$(pwd)/litert_android.zip"
 INITIAL_DIR="$(pwd)"
 update_release="false"
 
@@ -22,8 +22,15 @@ do
 done
 
 # Build configuration - enable GPU support
-BUILD_CONFIG="${BUILD_CONFIG:-android_arm64}"
 BUILD_INCLUDE="${BUILD_INCLUDE:-gpu}"  # Can be: gpu, npu, gpu,npu, cpu_only
+
+# Architecture configurations: config_name:abi_name:bazel_output_path
+declare -a ARCHITECTURES=(
+    "android_arm64:arm64-v8a:arm64-v8a-opt"
+    "android_arm:armeabi-v7a:armeabi-v7a-opt"
+    "android_x86_64:x86_64:x86_64-opt"
+    "android_x86:x86:x86-opt"
+)
 
 # Clone LiteRT if it doesn't already exists
 if [ ! -d "${LITERT_SRC}" ]; then
@@ -66,7 +73,7 @@ build_with_docker() {
         return 1
     fi
 
-    echo "Running Bazel build inside Docker..."
+    echo "Running Bazel builds inside Docker for all architectures..."
     
     HOST_OS=$(uname -s || echo unknown)
     HOST_ARCH=$(uname -m || echo unknown)
@@ -75,46 +82,73 @@ build_with_docker() {
         DISABLE_SVE_ARG="-e DISABLE_SVE_FOR_BAZEL=1"
     fi
 
-    # Build flags for GPU/NPU support
-    BUILD_FLAGS="--config=${BUILD_CONFIG}"
-    if [ -n "$BUILD_INCLUDE" ]; then
-        BUILD_FLAGS="$BUILD_FLAGS --//litert/build_common:build_include=${BUILD_INCLUDE}"
-    fi
-    
-    echo "Build configuration: $BUILD_FLAGS"
-
-    
-    # Run the build command inside the container
-    # Build the main runtime library with GPU support enabled
+    # Build target
     TARGET="//litert/c:litert_runtime_c_api_so"
-    sudo docker run --rm \
-        --security-opt seccomp=unconfined \
-        --user $(id -u):$(id -g) \
-        -e HOME=/litert_build \
-        -e USER=$(whoami) \
-        $DISABLE_SVE_ARG \
-        -v $(pwd):/litert_build \
-        -w /litert_build \
-        litert_build \
-        bazel build $BUILD_FLAGS $TARGET
+    
+    # Loop through all architectures
+    for arch_config in "${ARCHITECTURES[@]}"; do
+        IFS=':' read -r BUILD_CONFIG ABI_NAME OUTPUT_PATH <<< "$arch_config"
+        
+        echo ""
+        echo "---"
+        echo "Building for $ABI_NAME (config: $BUILD_CONFIG)..."
+        echo "---"
+        
+        # Build flags for GPU/NPU support
+        BUILD_FLAGS="--config=${BUILD_CONFIG}"
+        if [ -n "$BUILD_INCLUDE" ]; then
+            BUILD_FLAGS="$BUILD_FLAGS --//litert/build_common:build_include=${BUILD_INCLUDE}"
+        fi
+        
+        echo "Build configuration: $BUILD_FLAGS"
+        
+        # Run the build command inside the container
+        sudo docker run --rm \
+            --security-opt seccomp=unconfined \
+            --user $(id -u):$(id -g) \
+            -e HOME=/litert_build \
+            -e USER=$(whoami) \
+            $DISABLE_SVE_ARG \
+            -v $(pwd):/litert_build \
+            -w /litert_build \
+            litert_build \
+            bazel build $BUILD_FLAGS $TARGET
 
-    if [ $? -eq 0 ]; then
-        echo "Docker build successful."
-
-        # Find shared library
-        FOUND=$(find .cache -name "libLiteRt.so" -path "*/arm64-v8a-opt/bin/litert/c/*" 2>/dev/null | head -1)
-        if [ -n "$FOUND" ]; then
-            echo "Build Artifacts: $(pwd)/$FOUND"
-            package_artifacts
-            return 0
-        else
-            echo "Build completed but libLiteRt.so not found."
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Build failed for $ABI_NAME"
             return 1
         fi
-    fi
+        
+        echo "Build successful for $ABI_NAME"
+    done
     
-    echo "Docker build failed or artifacts not found."
-    return 1
+    echo ""
+    echo "---"
+    echo "All architecture builds completed successfully!"
+    echo "---"
+    
+    # Verify all libraries were generated
+    echo "Verifying build artifacts..."
+    all_found=true
+    for arch_config in "${ARCHITECTURES[@]}"; do
+        IFS=':' read -r BUILD_CONFIG ABI_NAME OUTPUT_PATH <<< "$arch_config"
+        FOUND=$(find .cache -name "libLiteRt.so" -path "*/${OUTPUT_PATH}/bin/litert/c/*" 2>/dev/null | head -1)
+        if [ -n "$FOUND" ]; then
+            echo "Found $ABI_NAME: $FOUND"
+        else
+            echo "Missing $ABI_NAME library"
+            all_found=false
+        fi
+    done
+
+    if [ "$all_found" = true ]; then
+        echo "Docker builds successful."
+        package_artifacts
+        return 0
+    else
+        echo "Build completed but some libraries not found."
+        return 1
+    fi
 }
 
 # Package artifacts into a zip file suitable for CMake FetchContent
@@ -122,23 +156,26 @@ package_artifacts() {
     echo "Packaging artifacts into zip file..."
     
     rm -rf "$OUTPUT_DIR"
-    mkdir -p "$OUTPUT_DIR/lib"
     mkdir -p "$OUTPUT_DIR/include"
     
-    # Find and copy the shared library
-    SO_FILE=""
-    
-    # Search specifically in arm64-v8a-opt output to avoid wrong architecture
-    # Use the most recent file in case of multiple builds
-    SO_FILE=$(find .cache -name "libLiteRt.so" -path "*/arm64-v8a-opt/bin/litert/c/*" 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-    
-    if [ -n "$SO_FILE" ]; then
-        echo "Copying library: $SO_FILE"
-        cp "$SO_FILE" "$OUTPUT_DIR/lib/"
-    else
-        echo "Error: Could not find libLiteRt.so"
-        return 1
-    fi
+    # Find and copy the shared libraries for all architectures
+    echo "Copying libraries for all architectures..."
+    for arch_config in "${ARCHITECTURES[@]}"; do
+        IFS=':' read -r BUILD_CONFIG ABI_NAME OUTPUT_PATH <<< "$arch_config"
+        
+        mkdir -p "$OUTPUT_DIR/lib/$ABI_NAME"
+        
+        # Search for the architecture-specific library
+        SO_FILE=$(find .cache -name "libLiteRt.so" -path "*/${OUTPUT_PATH}/bin/litert/c/*" 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+        
+        if [ -n "$SO_FILE" ]; then
+            echo "  Copying $ABI_NAME library: $SO_FILE"
+            cp "$SO_FILE" "$OUTPUT_DIR/lib/$ABI_NAME/"
+        else
+            echo "  ERROR: Could not find libLiteRt.so for $ABI_NAME"
+            return 1
+        fi
+    done
 
     # Download GPU Accelerator from Google Maven
     echo "Downloading GPU Accelerator from Google Maven..."
@@ -148,12 +185,19 @@ package_artifacts() {
     
     if curl -sL "$AAR_URL" -o "$TEMP_AAR_DIR/litert.aar"; then
         cd "$TEMP_AAR_DIR"
-        if unzip -q litert.aar "jni/arm64-v8a/libLiteRtOpenClAccelerator.so" 2>/dev/null; then
-            cp "jni/arm64-v8a/libLiteRtOpenClAccelerator.so" "$OUTPUT_DIR/lib/"
-            echo "Copied GPU Accelerator: libLiteRtOpenClAccelerator.so"
-        else
-            echo "WARNING: Could not extract GPU Accelerator from AAR"
-        fi
+        
+        # Extract GPU accelerator for all architectures
+        for arch_config in "${ARCHITECTURES[@]}"; do
+            IFS=':' read -r BUILD_CONFIG ABI_NAME OUTPUT_PATH <<< "$arch_config"
+            
+            if unzip -q litert.aar "jni/$ABI_NAME/libLiteRtOpenClAccelerator.so" 2>/dev/null; then
+                cp "jni/$ABI_NAME/libLiteRtOpenClAccelerator.so" "$OUTPUT_DIR/lib/$ABI_NAME/"
+                echo "  Copied GPU Accelerator for $ABI_NAME"
+            else
+                echo "  WARNING: Could not extract GPU Accelerator for $ABI_NAME from AAR"
+            fi
+        done
+        
         cd - > /dev/null
     else
         echo "WARNING: Could not download LiteRT AAR from Google Maven"
@@ -290,10 +334,11 @@ FetchContent_Declare(
 set(FLATBUFFERS_BUILD_TESTS OFF)
 set(FLATBUFFERS_INSTALL OFF)
 FetchContent_MakeAvailable(flatbuffers)
+
 # --- LiteRT C API (Shared Library) ---
 add_library(litert_c_api SHARED IMPORTED GLOBAL)
 set_target_properties(litert_c_api PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/libLiteRt.so"
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/${ANDROID_ABI}/libLiteRt.so"
     INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 
@@ -301,7 +346,7 @@ set_target_properties(litert_c_api PROPERTIES
 # This library is dynamically loaded at runtime by LiteRT when GPU compilation is requested
 add_library(litert_gpu_accelerator SHARED IMPORTED GLOBAL)
 set_target_properties(litert_gpu_accelerator PROPERTIES
-    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/libLiteRtOpenClAccelerator.so"
+    IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/${ANDROID_ABI}/libLiteRtOpenClAccelerator.so"
 )
 
 # --- LiteRT C++ API (Static Wrapper) ---
@@ -319,7 +364,7 @@ target_include_directories(litert_cc_api PUBLIC
 )
 
 # Link against the C API shared library and Abseil
-# Note: Ensure Abseil is available in whichever project uses this
+# Note: You must ensure Abseil is available in your main project
 target_link_libraries(litert_cc_api PUBLIC
     litert_c_api
     absl::status
@@ -346,11 +391,16 @@ EOF
     echo "Zip file: $ZIP_FILE"
     echo ""
     echo "Package contents:"
-    echo "  - lib/libLiteRt.so: Main runtime library (CPU support)"
-    echo "  - lib/libLiteRtOpenClAccelerator.so: GPU accelerator (OpenCL)"
+    echo "  - lib/arm64-v8a/: Libraries for ARM 64-bit"
+    echo "  - lib/armeabi-v7a/: Libraries for ARM 32-bit"
+    echo "  - lib/x86_64/: Libraries for x86 64-bit"
+    echo "  - lib/x86/: Libraries for x86 32-bit"
+    echo "    - libLiteRt.so: Main runtime library"
+    echo "    - libLiteRtOpenClAccelerator.so: GPU accelerator (OpenCL)"
     echo "  - include/litert/c/: C API headers"
     echo "  - include/litert/cc/: C++ API headers"
     echo "  - include/tflite/: TFLite compatibility headers"
+    echo "  - CMakeLists.txt: CMake configuration (uses \${ANDROID_ABI})"
     echo "---"
 }
 
